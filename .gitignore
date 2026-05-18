@@ -1,0 +1,10 @@
+.gradle/
+build/
+app/build/
+app/release/
+*.iml
+.idea/
+local.properties
+design/
+skills/
+/donate.jpg
