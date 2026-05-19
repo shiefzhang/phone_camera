@@ -2,6 +2,27 @@
 
 把闲置 Android 手机变成局域网网络摄像头。
 
+## 运行效果
+
+<table>
+  <tr>
+    <td align="center">
+      <strong>手机端效果</strong>
+    </td>
+    <td align="center">
+      <strong>浏览器打开视频效果</strong>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="pc_side.jpg" alt="手机端显示网络摄像头地址和连接信息" width="360">
+    </td>
+    <td align="center" width="50%">
+      <img src="phone_side.jpg" alt="浏览器中打开手机摄像头视频画面" width="360">
+    </td>
+  </tr>
+</table>
+
 ## 兼容性
 
 - 最低 Android 版本：Android 4.1，API 16。
