@@ -3,6 +3,10 @@ package com.example.phonecamera;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
@@ -24,6 +28,9 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
+import android.widget.Spinner;
+import android.widget.ArrayAdapter;
+import android.widget.AdapterView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -48,13 +55,16 @@ public class MainActivity extends Activity {
     private TextView statusText;
     private TextView connectionsText;
     private TextView zoomText;
+    private TextView resolutionText;
     private Button toggleInfoButton;
     private ImageButton toggleAboutButton;
     private ScrollView infoScrollView;
     private LinearLayout infoContent;
     private SeekBar zoomSeekBar;
+    private Spinner resolutionSpinner;
     private ImageButton switchCameraButton;
     private ImageButton orientationButton;
+    private ImageButton torchButton;
     private EditText userInput;
     private EditText passwordInput;
     private Button saveButton;
@@ -66,6 +76,8 @@ public class MainActivity extends Activity {
     private ConnectionRegistry connectionRegistry;
     private SharedPreferences preferences;
     private boolean infoExpanded = false;
+    private boolean updatingCameraControls = false;
+    private BroadcastReceiver screenReceiver;
     private final Handler uiHandler = new Handler();
     private final Runnable connectionsRefresh = new Runnable() {
         @Override
@@ -82,6 +94,7 @@ public class MainActivity extends Activity {
         preferences = getSharedPreferences("phone_camera", MODE_PRIVATE);
         connectionRegistry = new ConnectionRegistry();
         buildUi();
+        registerScreenReceiver();
         loadCredentials();
         saveButton.setOnClickListener(new android.view.View.OnClickListener() {
             @Override
@@ -113,6 +126,12 @@ public class MainActivity extends Activity {
                 toggleOutputOrientation();
             }
         });
+        torchButton.setOnClickListener(new android.view.View.OnClickListener() {
+            @Override
+            public void onClick(android.view.View view) {
+                toggleTorch();
+            }
+        });
         zoomSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
@@ -128,6 +147,29 @@ public class MainActivity extends Activity {
 
             @Override
             public void onStopTrackingTouch(SeekBar seekBar) {
+            }
+        });
+        resolutionSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, final int position, long id) {
+                if (updatingCameraControls || cameraStreamer == null) {
+                    return;
+                }
+                runOnUiThreadAndWait(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (cameraStreamer != null && cameraStreamer.setResolutionIndex(position)) {
+                            updateCameraControls();
+                            Toast.makeText(MainActivity.this,
+                                    "\u5df2\u5207\u6362\u5206\u8fa8\u7387\uff1a" + cameraStreamer.getActualResolutionLabel(),
+                                    Toast.LENGTH_SHORT).show();
+                        }
+                    }
+                });
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
             }
         });
 
@@ -153,6 +195,8 @@ public class MainActivity extends Activity {
         if (rtspServer != null) {
             rtspServer.stop();
         }
+        stopService(new Intent(this, KeepAliveService.class));
+        unregisterScreenReceiver();
         uiHandler.removeCallbacks(connectionsRefresh);
     }
 
@@ -174,6 +218,7 @@ public class MainActivity extends Activity {
         if (cameraStreamer == null) {
             return;
         }
+        updatingCameraControls = true;
         switchCameraButton.setEnabled(cameraStreamer.hasMultipleCameras());
         switchCameraButton.setContentDescription(cameraStreamer.isFrontCamera()
                 ? "\u5207\u6362\u5230\u540e\u7f6e\u6444\u50cf\u5934"
@@ -184,8 +229,12 @@ public class MainActivity extends Activity {
         zoomSeekBar.setEnabled(zoomSupported);
         zoomSeekBar.setMax(maxZoom);
         zoomSeekBar.setProgress(cameraStreamer.getZoom());
+        resolutionSpinner.setSelection(cameraStreamer.getResolutionIndex());
+        resolutionText.setText("\u5206\u8fa8\u7387\uff1a" + cameraStreamer.getActualResolutionLabel());
         updateZoomText();
         updateOrientationButton();
+        updateTorchButton();
+        updatingCameraControls = false;
     }
 
     private boolean permissionsGranted(int[] grantResults) {
@@ -291,6 +340,52 @@ public class MainActivity extends Activity {
         connectionsText.setBackground(rounded(Color.rgb(2, 6, 23), dp(10), Color.rgb(51, 65, 85), 1));
         infoContent.addView(connectionsText);
 
+        LinearLayout resolutionControls = new LinearLayout(this);
+        resolutionControls.setOrientation(LinearLayout.HORIZONTAL);
+        resolutionControls.setGravity(Gravity.CENTER_VERTICAL);
+        resolutionControls.setPadding(0, dp(10), 0, 0);
+        infoContent.addView(resolutionControls, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
+
+        resolutionText = label("\u5206\u8fa8\u7387\uff1a640x480");
+        resolutionText.setTextColor(Color.rgb(203, 213, 225));
+        resolutionControls.addView(resolutionText, new LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+        ));
+
+        resolutionSpinner = new Spinner(this);
+        ArrayAdapter<String> resolutionAdapter = new ArrayAdapter<String>(
+                this,
+                android.R.layout.simple_spinner_item,
+                CameraStreamer.RESOLUTION_LABELS
+        ) {
+            @Override
+            public View getView(int position, View convertView, android.view.ViewGroup parent) {
+                TextView view = (TextView) super.getView(position, convertView, parent);
+                styleSpinnerText(view, false);
+                return view;
+            }
+
+            @Override
+            public View getDropDownView(int position, View convertView, android.view.ViewGroup parent) {
+                TextView view = (TextView) super.getDropDownView(position, convertView, parent);
+                styleSpinnerText(view, true);
+                return view;
+            }
+        };
+        resolutionAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        resolutionSpinner.setAdapter(resolutionAdapter);
+        resolutionSpinner.setBackground(rounded(Color.rgb(30, 41, 59), dp(10), Color.rgb(103, 232, 249), 1));
+        resolutionSpinner.setPadding(dp(8), 0, dp(8), 0);
+        resolutionControls.addView(resolutionSpinner, new LinearLayout.LayoutParams(
+                dp(150),
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
+
         LinearLayout cameraControls = new LinearLayout(this);
         cameraControls.setOrientation(LinearLayout.HORIZONTAL);
         cameraControls.setGravity(Gravity.CENTER_VERTICAL);
@@ -313,6 +408,13 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams orientationParams = new LinearLayout.LayoutParams(dp(52), dp(48));
         orientationParams.leftMargin = dp(10);
         cameraControls.addView(orientationButton, orientationParams);
+
+        torchButton = iconButton(R.drawable.ic_torch_off, "\u6253\u5f00\u8865\u5149\u706f",
+                Color.rgb(180, 83, 9), Color.rgb(253, 230, 138));
+        torchButton.setEnabled(false);
+        LinearLayout.LayoutParams torchParams = new LinearLayout.LayoutParams(dp(52), dp(48));
+        torchParams.leftMargin = dp(10);
+        cameraControls.addView(torchButton, torchParams);
 
         zoomText = label("\u7f29\u653e\uff1a\u4e0d\u652f\u6301");
         zoomText.setGravity(Gravity.RIGHT);
@@ -387,6 +489,32 @@ public class MainActivity extends Activity {
         boolean portrait = cameraStreamer == null || cameraStreamer.isOutputPortrait();
         orientationButton.setImageResource(portrait ? R.drawable.ic_orientation_portrait : R.drawable.ic_orientation_landscape);
         orientationButton.setContentDescription(portrait ? "\u8f93\u51fa\u6a2a\u5c4f" : "\u8f93\u51fa\u7ad6\u5c4f");
+    }
+
+    private void toggleTorch() {
+        if (cameraStreamer == null || !cameraStreamer.isTorchSupported()) {
+            Toast.makeText(this, "\u5f53\u524d\u6444\u50cf\u5934\u4e0d\u652f\u6301\u8865\u5149\u706f", Toast.LENGTH_SHORT).show();
+            updateTorchButton();
+            return;
+        }
+        boolean target = !cameraStreamer.isTorchEnabled();
+        boolean changed = cameraStreamer.setTorchEnabled(target);
+        updateTorchButton();
+        Toast.makeText(this, changed && cameraStreamer.isTorchEnabled()
+                ? "\u5df2\u6253\u5f00\u8865\u5149\u706f"
+                : "\u5df2\u5173\u95ed\u8865\u5149\u706f", Toast.LENGTH_SHORT).show();
+    }
+
+    private void updateTorchButton() {
+        if (torchButton == null) {
+            return;
+        }
+        boolean supported = cameraStreamer != null && cameraStreamer.isTorchSupported();
+        boolean enabled = supported && cameraStreamer.isTorchEnabled();
+        torchButton.setEnabled(supported);
+        torchButton.setImageResource(enabled ? R.drawable.ic_torch_on : R.drawable.ic_torch_off);
+        torchButton.setAlpha(supported ? 1.0f : 0.45f);
+        torchButton.setContentDescription(enabled ? "\u5173\u95ed\u8865\u5149\u706f" : "\u6253\u5f00\u8865\u5149\u706f");
     }
 
     private void toggleInfoPanel() {
@@ -493,7 +621,7 @@ public class MainActivity extends Activity {
             }
             return packageInfo.versionName + " (" + versionCode + ")";
         } catch (PackageManager.NameNotFoundException e) {
-            return "1.0 (1)";
+            return "1.1.0 (2)";
         }
     }
 
@@ -568,6 +696,18 @@ public class MainActivity extends Activity {
         return button;
     }
 
+    private void styleSpinnerText(TextView view, boolean dropdown) {
+        view.setTextColor(dropdown ? Color.rgb(15, 23, 42) : Color.rgb(226, 232, 240));
+        view.setTextSize(15);
+        view.setGravity(Gravity.CENTER_VERTICAL);
+        view.setPadding(dp(10), dp(8), dp(10), dp(8));
+        if (dropdown) {
+            view.setBackgroundColor(Color.rgb(241, 245, 249));
+        } else {
+            view.setBackgroundColor(Color.TRANSPARENT);
+        }
+    }
+
     private GradientDrawable rounded(int color, int radius, int strokeColor, int strokeWidth) {
         GradientDrawable drawable = new GradientDrawable();
         drawable.setColor(color);
@@ -605,6 +745,7 @@ public class MainActivity extends Activity {
     }
 
     private void startCameraAndServer() {
+        startKeepAliveService();
         cameraStreamer = new CameraStreamer(this, preview);
         cameraStreamer.start();
         audioEncoder = new AacAudioEncoder();
@@ -715,6 +856,50 @@ public class MainActivity extends Activity {
                 : "\u89c6\u9891\u5df2\u542f\u52a8\uff0c\u4f46\u9ea6\u514b\u98ce\u6216 AAC \u7f16\u7801\u5668\u542f\u52a8\u5931\u8d25");
         uiHandler.removeCallbacks(connectionsRefresh);
         uiHandler.post(connectionsRefresh);
+    }
+
+    private void startKeepAliveService() {
+        Intent intent = new Intent(this, KeepAliveService.class);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent);
+        } else {
+            startService(intent);
+        }
+    }
+
+    private void registerScreenReceiver() {
+        screenReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                String action = intent.getAction();
+                if (Intent.ACTION_SCREEN_OFF.equals(action)) {
+                    if (cameraStreamer != null) {
+                        cameraStreamer.setScreenOffStreaming(true);
+                    }
+                    showStatus("\u5df2\u8fdb\u5165\u606f\u5c4f\u8f6c\u64ad\u6a21\u5f0f\uff0c\u6b63\u5728\u4fdd\u6301\u6444\u50cf\u5934\u548c Wi-Fi");
+                } else if (Intent.ACTION_SCREEN_ON.equals(action)) {
+                    if (cameraStreamer != null) {
+                        cameraStreamer.setScreenOffStreaming(false);
+                    }
+                    showStatus("\u5df2\u6062\u590d\u5c4f\u5e55\u9884\u89c8");
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
+        filter.addAction(Intent.ACTION_SCREEN_ON);
+        registerReceiver(screenReceiver, filter);
+    }
+
+    private void unregisterScreenReceiver() {
+        if (screenReceiver == null) {
+            return;
+        }
+        try {
+            unregisterReceiver(screenReceiver);
+        } catch (IllegalArgumentException ignored) {
+        }
+        screenReceiver = null;
     }
 
     private void updateConnectionsList() {

@@ -14,8 +14,9 @@ import java.util.List;
 
 @SuppressWarnings("deprecation")
 public class CameraStreamer {
-    private static final int TARGET_WIDTH = 640;
-    private static final int TARGET_HEIGHT = 480;
+    public static final String[] RESOLUTION_LABELS = new String[]{"640x480", "1280x720", "1920x1080"};
+    private static final int[] TARGET_WIDTHS = new int[]{640, 1280, 1920};
+    private static final int[] TARGET_HEIGHTS = new int[]{480, 720, 1080};
     private static final int JPEG_QUALITY = 70;
 
     private final Activity activity;
@@ -23,14 +24,18 @@ public class CameraStreamer {
     private final Object frameLock = new Object();
 
     private Camera camera;
+    private SurfaceTexture offscreenTexture;
     private volatile H264Encoder h264Encoder;
     private volatile byte[] latestJpeg;
-    private int previewWidth = TARGET_WIDTH;
-    private int previewHeight = TARGET_HEIGHT;
+    private int previewWidth = TARGET_WIDTHS[0];
+    private int previewHeight = TARGET_HEIGHTS[0];
+    private int resolutionIndex = 0;
     private int naturalOutputRotation = 90;
     private boolean outputPortrait = true;
     private int currentCameraId = -1;
     private int currentZoom = 0;
+    private boolean torchEnabled = false;
+    private boolean screenOffStreaming = false;
 
     public CameraStreamer(Activity activity, TextureView preview) {
         this.activity = activity;
@@ -44,7 +49,11 @@ public class CameraStreamer {
             preview.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
                 @Override
                 public void onSurfaceTextureAvailable(SurfaceTexture surface, int width, int height) {
-                    openCamera();
+                    if (camera != null && screenOffStreaming) {
+                        setScreenOffStreaming(false);
+                    } else {
+                        openCamera();
+                    }
                 }
 
                 @Override
@@ -53,6 +62,9 @@ public class CameraStreamer {
 
                 @Override
                 public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) {
+                    if (screenOffStreaming) {
+                        return true;
+                    }
                     stop();
                     return true;
                 }
@@ -79,6 +91,7 @@ public class CameraStreamer {
         }
         camera.release();
         camera = null;
+        releaseOffscreenTexture();
         if (h264Encoder != null) {
             h264Encoder.stop();
             h264Encoder = null;
@@ -135,6 +148,59 @@ public class CameraStreamer {
         }
     }
 
+    public synchronized boolean isTorchSupported() {
+        if (camera == null) {
+            return false;
+        }
+        try {
+            List<String> flashModes = camera.getParameters().getSupportedFlashModes();
+            return flashModes != null && flashModes.contains(Camera.Parameters.FLASH_MODE_TORCH);
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    public synchronized boolean isTorchEnabled() {
+        return torchEnabled;
+    }
+
+    public synchronized boolean setTorchEnabled(boolean enabled) {
+        torchEnabled = enabled;
+        if (camera == null) {
+            return false;
+        }
+        try {
+            Camera.Parameters parameters = camera.getParameters();
+            List<String> flashModes = parameters.getSupportedFlashModes();
+            if (flashModes == null || !flashModes.contains(Camera.Parameters.FLASH_MODE_TORCH)) {
+                torchEnabled = false;
+                return false;
+            }
+            parameters.setFlashMode(enabled ? Camera.Parameters.FLASH_MODE_TORCH : Camera.Parameters.FLASH_MODE_OFF);
+            camera.setParameters(parameters);
+            return true;
+        } catch (RuntimeException e) {
+            torchEnabled = false;
+            return false;
+        }
+    }
+
+    public synchronized void setScreenOffStreaming(boolean enabled) {
+        screenOffStreaming = enabled;
+        if (camera == null) {
+            return;
+        }
+        try {
+            camera.stopPreview();
+            camera.setPreviewTexture(getActivePreviewTexture());
+            camera.startPreview();
+            if (!enabled) {
+                releaseOffscreenTexture();
+            }
+        } catch (IOException | RuntimeException ignored) {
+        }
+    }
+
     public synchronized boolean switchCamera() {
         int count = Camera.getNumberOfCameras();
         if (count <= 1) {
@@ -144,7 +210,32 @@ public class CameraStreamer {
         stop();
         currentCameraId = nextCameraId;
         currentZoom = 0;
+        torchEnabled = false;
         openCamera();
+        return true;
+    }
+
+    public synchronized int getResolutionIndex() {
+        return resolutionIndex;
+    }
+
+    public synchronized String getActualResolutionLabel() {
+        return previewWidth + "x" + previewHeight;
+    }
+
+    public synchronized boolean setResolutionIndex(int index) {
+        int safeIndex = Math.max(0, Math.min(index, RESOLUTION_LABELS.length - 1));
+        if (resolutionIndex == safeIndex) {
+            return false;
+        }
+        resolutionIndex = safeIndex;
+        synchronized (frameLock) {
+            latestJpeg = null;
+        }
+        if (camera != null) {
+            stop();
+            openCamera();
+        }
         return true;
     }
 
@@ -225,7 +316,7 @@ public class CameraStreamer {
             restartH264Encoder();
             camera.setDisplayOrientation(displayOrientation);
             updatePreviewAspectRatio(displayOrientation);
-            camera.setPreviewTexture(preview.getSurfaceTexture());
+            camera.setPreviewTexture(getActivePreviewTexture());
             camera.setPreviewCallback(new Camera.PreviewCallback() {
                 @Override
                 public void onPreviewFrame(byte[] data, Camera camera) {
@@ -259,6 +350,27 @@ public class CameraStreamer {
         return 0;
     }
 
+    private SurfaceTexture getActivePreviewTexture() {
+        if (screenOffStreaming || !preview.isAvailable()) {
+            if (offscreenTexture == null) {
+                offscreenTexture = new SurfaceTexture(0);
+            }
+            offscreenTexture.setDefaultBufferSize(previewWidth, previewHeight);
+            return offscreenTexture;
+        }
+        return preview.getSurfaceTexture();
+    }
+
+    private void releaseOffscreenTexture() {
+        if (offscreenTexture != null) {
+            try {
+                offscreenTexture.release();
+            } catch (RuntimeException ignored) {
+            }
+            offscreenTexture = null;
+        }
+    }
+
     private void configureCamera() {
         Camera.Parameters parameters = camera.getParameters();
         Camera.Size size = choosePreviewSize(parameters.getSupportedPreviewSizes());
@@ -278,14 +390,26 @@ public class CameraStreamer {
         } else {
             currentZoom = 0;
         }
+        List<String> flashModes = parameters.getSupportedFlashModes();
+        if (flashModes != null && flashModes.contains(Camera.Parameters.FLASH_MODE_TORCH)) {
+            parameters.setFlashMode(torchEnabled ? Camera.Parameters.FLASH_MODE_TORCH : Camera.Parameters.FLASH_MODE_OFF);
+        } else {
+            torchEnabled = false;
+        }
         camera.setParameters(parameters);
     }
 
     private Camera.Size choosePreviewSize(List<Camera.Size> sizes) {
         Camera.Size best = sizes.get(0);
-        int bestScore = Integer.MAX_VALUE;
+        long bestScore = Long.MAX_VALUE;
+        int targetWidth = TARGET_WIDTHS[resolutionIndex];
+        int targetHeight = TARGET_HEIGHTS[resolutionIndex];
+        float targetRatio = targetWidth / (float) targetHeight;
         for (Camera.Size size : sizes) {
-            int score = Math.abs(size.width - TARGET_WIDTH) + Math.abs(size.height - TARGET_HEIGHT);
+            float ratio = size.width / (float) size.height;
+            long ratioPenalty = (long) (Math.abs(ratio - targetRatio) * 10000);
+            long sizeScore = Math.abs(size.width - targetWidth) + Math.abs(size.height - targetHeight);
+            long score = sizeScore + ratioPenalty;
             if (score < bestScore) {
                 best = size;
                 bestScore = score;

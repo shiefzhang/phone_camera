@@ -14,6 +14,7 @@ public class AacAudioEncoder {
     private static final int SAMPLE_RATE = 44100;
     private static final int CHANNEL_COUNT = 1;
     private static final int BIT_RATE = 64000;
+    private static final float PCM_GAIN = 4.0f;
 
     private volatile boolean running;
     private AudioRecord audioRecord;
@@ -117,8 +118,24 @@ public class AacAudioEncoder {
             if (read <= 0) {
                 continue;
             }
+            applyPcmGain(pcm, read);
             queueInput(pcm, read);
             drainOutput();
+        }
+    }
+
+    private void applyPcmGain(byte[] pcm, int length) {
+        int evenLength = length & ~1;
+        for (int i = 0; i < evenLength; i += 2) {
+            int sample = (pcm[i] & 0xff) | (pcm[i + 1] << 8);
+            int amplified = Math.round(sample * PCM_GAIN);
+            if (amplified > Short.MAX_VALUE) {
+                amplified = Short.MAX_VALUE;
+            } else if (amplified < Short.MIN_VALUE) {
+                amplified = Short.MIN_VALUE;
+            }
+            pcm[i] = (byte) (amplified & 0xff);
+            pcm[i + 1] = (byte) ((amplified >> 8) & 0xff);
         }
     }
 
